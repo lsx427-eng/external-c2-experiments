@@ -8,9 +8,9 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-/*
-The Auth struct stores all the functions utilized for key adding, removing, listing, and checking. When a user needs to allow anonymous authentication then that is stored directly in this function.
-*/
+// The Auth struct stores all the functions utilized for key adding, removing,
+// listing, and checking. When a user needs to allow anonymous authentication
+// then that is stored directly in this function.
 type Auth struct {
 	trusted    []ssh.PublicKey
 	anonymous  bool
@@ -20,7 +20,11 @@ type Auth struct {
 	CheckFunc  func(addr net.Addr, key ssh.PublicKey) (bool, error)
 }
 
-// NewAuth creates a new empty Auth. By default in sauth this function creates a simple in memory version of sauth that does not have a set trusted key nor allows for anonymous authentication. The NewAuth function will return an Auth struct that can then be overridden by the library user or even at runtime for situations such as emergency maintanance.
+// NewAuth creates a new empty Auth. By default in sauth this function creates
+// a simple in memory version of sauth that does not have a set trusted key nor
+// allows for anonymous authentication. The NewAuth function will return an
+// Auth struct that can then be overridden by the library user or even at
+// runtime for situations such as emergency maintanance.
 func NewAuth() *Auth {
 	a := &Auth{
 		trusted:   nil,
@@ -70,7 +74,8 @@ func (a *Auth) keys() ([]ssh.PublicKey, error) {
 	return a.trusted, nil
 }
 
-// AllowAnonymous sets whether keys that aren't in the trusted list are allowed to reach the post authentication phase and handlers.
+// AllowAnonymous sets whether keys that aren't in the trusted list are allowed
+// to reach the post authentication phase and handlers.
 func (a *Auth) AllowAnonymous(anon bool) bool {
 	a.anonymous = anon
 	return a.anonymous
@@ -81,12 +86,15 @@ func (a *Auth) Anonymous() bool {
 	return a.anonymous
 }
 
-// Check whether or not a public key is allowed. This function also accepts some metadata besides just keys, like IP addresses that are exposed for any application firewalling or other checks
+// Check whether or not a public key is allowed. This function also accepts
+// some metadata besides just keys, like IP addresses that are exposed for any
+// application firewalling or other checks
 func (a *Auth) Check(addr net.Addr, key ssh.PublicKey) (bool, error) {
 	return a.check(addr, key)
 }
 
-// Check determines if a pubkey fingerprint is permitted, in the default mode just checks if a key is in the trusted list
+// Check determines if a pubkey fingerprint is permitted, in the default mode
+// just checks if a key is in the trusted list
 func (a *Auth) check(addr net.Addr, key ssh.PublicKey) (bool, error) {
 	if len(a.trusted) < 1 {
 		return false, errors.New("No trusted keys")

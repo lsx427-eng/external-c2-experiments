@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vulncheck-oss/go-exploit/c2"
 	"github.com/vulncheck-oss/go-exploit/c2/channel"
 	"github.com/vulncheck-oss/go-exploit/c2/external"
 	"github.com/vulncheck-oss/go-exploit/output"
@@ -32,6 +33,8 @@ var (
 	commandQueue       []string
 )
 
+var Name = "SSHShellServer"
+
 type SSHC2Meta struct {
 	auth        *Auth
 	SSHConfig   *ssh.ServerConfig
@@ -39,6 +42,8 @@ type SSHC2Meta struct {
 	Listener    *net.Listener
 	trustedKeys []ssh.PublicKey
 }
+
+var SSHServer c2.Impl
 
 func New() SSHC2Meta {
 	return SSHC2Meta{}
@@ -75,10 +80,11 @@ func (c2 *SSHC2Meta) SSHServerFlags() {
 	// flag.BoolVar(& , "save-host-key", false, "Save the generated host key")
 	// flag.BoolVar(& , "generate-host-key", true, "Generate the SSH host key")
 	// flag.StringVar(& , "authorized-keys", "", "Comma separated authorized keys that the server will accept, if this is not set the server will allow any connection")
-	flag.StringVar(&flagCommand, "command", "", "")
-	flag.BoolVar(&flagInteractive, "interactive", true, "Run the commands in an interactive shell vs with -command")
-	flag.BoolVar(&flagHeartbeat, "heartbeat", false, "Print heartbeat checkins from the c2")
-	flag.BoolVar(&flagServerMessages, "server-messages", false, "Print server messages to the client")
+	// flag.BoolVar(& , "close-channels", true, "Close any open channels when the C2 exits. Setting this to false leaves active exploit sessions open")
+	flag.StringVar(&flagCommand, Name+".command", "", "Run a single command and exit the payload.")
+	flag.BoolVar(&flagHeartbeat, Name+".heartbeat", false, "Print heartbeat checkins from the c2")
+	flag.BoolVar(&flagServerMessages, Name+".server-messages", false, "Print server messages to the client")
+	flag.BoolVar(&flagInteractive, Name+".interactive", true, "Run the commands in an interactive shell.")
 }
 
 func (c2 *SSHC2Meta) SSHServerInit() {
@@ -116,9 +122,12 @@ func (c2 *SSHC2Meta) SSHServerChannel(channel *channel.Channel) {
 	c2.Channel = channel
 }
 
-func (c2 *SSHC2Meta) SSHServerRun(timeout int) {
+func (c2 *SSHC2Meta) SSHServerRun(timeout int) bool {
+	if flagCommand == "" && !flagInteractive {
+		output.PrintFrameworkError("-command not set and -interactive is false. At least one must be set")
+		return false
+	}
 	success := false
-
 	output.PrintfFrameworkDebug("External SSH Listener starting: %s:%d", c2.Channel.IPAddr, c2.Channel.Port)
 
 	l, err := net.Listen("tcp", fmt.Sprintf("%s:%d", c2.Channel.IPAddr, c2.Channel.Port))
@@ -126,36 +135,33 @@ func (c2 *SSHC2Meta) SSHServerRun(timeout int) {
 		panic(err)
 	}
 	c2.Listener = &l
-	defer l.Close()
-	if timeout > 0 {
-		go func() {
+	// defer l.Close()
+	isClosed := make(chan bool)
+	go func() {
+		if timeout != 0 {
 			time.Sleep(time.Duration(timeout) * time.Second)
-			if !success {
-				output.PrintFrameworkError("Timeout met. Shutting down SSH listener.")
-			}
-			(*c2.Listener).Close()
-		}()
-	}
-	if flagInteractive {
-		go func() {
-			for {
-				reader := bufio.NewReader(os.Stdin)
-				command, _ := reader.ReadString('\n')
-				if command == "exit\n" {
-					return
+			if !success || !flagInteractive {
+				if success {
+					output.PrintFrameworkStatus("Timeout met. Shutting down SSH listener.")
+				} else {
+					output.PrintFrameworkError("Timeout met. Shutting down SSH listener.")
 				}
-				output.PrintfFrameworkStatus("Running command on SSH client: '%s'", strings.ReplaceAll(command, "\n", ""))
-				commandQueue = append(commandQueue, command)
+
+				isClosed <- true
+				(*c2.Listener).Close()
 			}
-		}()
-	}
+
+		}
+	}()
+
 	for {
+
 		// Once a ServerConfig has been configured, connections can be accepted.
 		conn, err := (*c2.Listener).Accept()
 		if err != nil {
 			// I hate this, but
 			if strings.Contains(err.Error(), "use of closed network connection") {
-				return
+				return success
 			}
 			output.PrintfFrameworkError("SSH: Error accepting incoming connection: %v", err)
 			continue
@@ -176,11 +182,34 @@ func (c2 *SSHC2Meta) SSHServerRun(timeout int) {
 				}
 				return
 			}
-			output.PrintfFrameworkStatus("Active shell SSH: Connection accepted from %s@%s session: %s (%s)", sConn.User(), sConn.RemoteAddr(), hex.EncodeToString(sConn.SessionID()), sConn.ClientVersion())
+			output.PrintfFrameworkSuccess("Active shell SSH: Connection accepted from %s@%s session: %s (%s)", sConn.User(), sConn.RemoteAddr(), hex.EncodeToString(sConn.SessionID()), sConn.ClientVersion())
 			success = true
+			if flagInteractive {
+				output.PrintFrameworkStatus("Interactive session started")
+				go func() {
+					for {
+
+						reader := bufio.NewReader(os.Stdin)
+						command, _ := reader.ReadString('\n')
+						if command == "exit\n" {
+							isClosed <- true
+							(*c2.Listener).Close()
+							return
+						}
+						output.PrintfFrameworkStatus("Running command on SSH client: '%s'", strings.ReplaceAll(command, "\n", ""))
+						commandQueue = append(commandQueue, command)
+					}
+				}()
+			}
 			go ssh.DiscardRequests(reqs)
 			go handleServerConn(sConn.Permissions.Extensions["key-id"], sConn.Permissions.Extensions["pubkey"], chans, commandHandler)
+			go func(isClosed <-chan bool) {
+				if <-isClosed {
+					sConn.Close()
+				}
+			}(isClosed)
 		}()
+
 	}
 }
 
@@ -192,7 +221,7 @@ func commandHandler(b []byte, k ssh.PublicKey) ([]byte, error) {
 		}
 		if flagCommand != "" {
 			c := flagCommand
-			flagCommand = ""
+			flagCommand = "exit"
 			return []byte(c), nil
 		}
 		if flagInteractive {
@@ -209,8 +238,6 @@ func commandHandler(b []byte, k ssh.PublicKey) ([]byte, error) {
 }
 
 func handleServerConn(keyID string, pk string, chans <-chan ssh.NewChannel, function func([]byte, ssh.PublicKey) ([]byte, error)) error {
-	// FIXME chanError return value is pretty much just symbolic since the return values are in a go routine. This also makes all the error return building pointless. Fix this when adding the logging
-
 	var chanError error
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
@@ -225,6 +252,7 @@ func handleServerConn(keyID string, pk string, chans <-chan ssh.NewChannel, func
 
 		go func(in <-chan *ssh.Request) error {
 			defer ch.Close()
+
 			for req := range in {
 				switch req.Type {
 				case "exec", "pty-req":
@@ -239,7 +267,6 @@ func handleServerConn(keyID string, pk string, chans <-chan ssh.NewChannel, func
 					ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 					return chanError
 				case "env":
-					// env just falls through
 				case "x11-req", "auth-agent-req@openssh.com", "subsystem", "shell":
 					// TODO add way to support other request types
 					output.PrintfFrameworkDebug("SSH: Request type not supported: %#v", req.Type)
@@ -250,7 +277,7 @@ func handleServerConn(keyID string, pk string, chans <-chan ssh.NewChannel, func
 					ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
 					return chanError
 				default:
-					chanError = errors.New(fmt.Sprintf("SSH: Request type not valid: %#v\n", req.Type))
+					chanError = fmt.Errorf("SSH: Request type not valid: %#v", req.Type)
 					output.PrintfFrameworkDebug("SSH: Request type not valid: %#v", req.Type)
 					if flagServerMessages {
 						req.Reply(false, []byte("Request type not valid"))
@@ -270,9 +297,10 @@ func handleServerConn(keyID string, pk string, chans <-chan ssh.NewChannel, func
 }
 
 func Configure(externalServer *external.Server) {
+	SSHServer = c2.AddC2(Name)
 	sshc2 := New()
-	externalServer.SetChannel(sshc2.SSHServerChannel)
 	externalServer.SetFlags(sshc2.SSHServerFlags)
+	externalServer.SetChannel(sshc2.SSHServerChannel)
 	externalServer.SetInit(sshc2.SSHServerInit)
 	externalServer.SetRun(sshc2.SSHServerRun)
 }
