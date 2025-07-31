@@ -1,4 +1,4 @@
-module github.com/terrorbyte/external-c2-experiments/ssh
+module github.com/vulncheck-oss/external-c2-experiments/ssh
 
 go 1.22.4
 
